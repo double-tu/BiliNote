@@ -10,6 +10,9 @@ export interface TranscriberConfig {
   /** 用户自定义模型映射：名称 → HF repo_id 或本地路径 */
   whisper_custom_models?: Record<string, string>
   mlx_whisper_available: boolean
+  transcriber_provider_id: string
+  transcriber_model: string
+  transcriber_providers: { id: string; name: string; base_url: string; enabled: number }[]
 }
 
 export interface ModelStatus {
@@ -35,6 +38,8 @@ export const getTranscriberConfig = async (): Promise<TranscriberConfig> => {
 export const updateTranscriberConfig = async (data: {
   transcriber_type: string
   whisper_model_size?: string
+  transcriber_provider_id?: string
+  transcriber_model?: string
 }) => {
   return await request.post('/transcriber_config', data)
 }

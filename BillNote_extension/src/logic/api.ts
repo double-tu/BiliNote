@@ -111,12 +111,19 @@ export async function getTranscriberConfig(): Promise<TranscriberConfig> {
   return request<TranscriberConfig>('/api/transcriber_config')
 }
 
-export async function setTranscriberConfig(transcriberType: TranscriberType, whisperModelSize?: WhisperModelSize): Promise<TranscriberConfig> {
+export async function setTranscriberConfig(
+  transcriberType: TranscriberType,
+  whisperModelSize?: WhisperModelSize,
+  providerId?: string,
+  model?: string,
+): Promise<TranscriberConfig> {
   return request<TranscriberConfig>('/api/transcriber_config', {
     method: 'POST',
     body: JSON.stringify({
       transcriber_type: transcriberType,
       whisper_model_size: whisperModelSize ?? null,
+      transcriber_provider_id: providerId ?? null,
+      transcriber_model: model ?? null,
     }),
   })
 }

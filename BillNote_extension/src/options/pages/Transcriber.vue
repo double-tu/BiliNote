@@ -4,6 +4,7 @@ import {
   downloadTranscriberModel,
   getTranscriberConfig,
   getTranscriberModelsStatus,
+  getProviders,
   setTranscriberConfig,
 } from '~/logic/api'
 import type {
@@ -14,17 +15,23 @@ import type {
   WhisperModelStatus,
 } from '~/logic/types'
 
+type TranscriberProvider = { id: string, name: string, base_url?: string, enabled: number }
+
 const config = ref<TranscriberConfig | null>(null)
 const status = ref<TranscriberModelsStatus | null>(null)
 
 const selType = ref<TranscriberType>('fast-whisper')
 const selSize = ref<WhisperModelSize>('medium')
+const selProvider = ref('')
+const selModel = ref('')
+const providers = ref<TranscriberProvider[]>([])
 
 const loading = ref(false)
 const saving = ref(false)
 const message = ref<{ kind: 'ok' | 'err' | 'idle', text: string }>({ kind: 'idle', text: '' })
 
 const isWhisperLike = computed(() => selType.value === 'fast-whisper' || selType.value === 'mlx-whisper')
+const isCloud = computed(() => ['openai-compatible', 'qwen', 'doubao'].includes(selType.value))
 
 async function refresh() {
   loading.value = true
@@ -33,7 +40,10 @@ async function refresh() {
     const [cfg, st] = await Promise.all([getTranscriberConfig(), getTranscriberModelsStatus()])
     config.value = cfg
     status.value = st
+    providers.value = cfg.transcriber_providers || await getProviders()
     selType.value = cfg.transcriber_type
+    selProvider.value = cfg.transcriber_provider_id || (selType.value === 'doubao' ? 'volcengine' : selType.value === 'qwen' ? 'qwen' : 'openai')
+    selModel.value = cfg.transcriber_model || (selType.value === 'qwen' ? 'qwen3-asr-flash-realtime' : selType.value === 'doubao' ? 'bigmodel' : 'whisper-1')
     if (cfg.whisper_model_size)
       selSize.value = cfg.whisper_model_size
   }
@@ -49,7 +59,12 @@ async function save() {
   saving.value = true
   message.value = { kind: 'idle', text: '保存中…' }
   try {
-    const cfg = await setTranscriberConfig(selType.value, isWhisperLike.value ? selSize.value : undefined)
+    const cfg = await setTranscriberConfig(
+      selType.value,
+      isWhisperLike.value ? selSize.value : undefined,
+      isCloud.value ? selProvider.value : undefined,
+      isCloud.value ? selModel.value.trim() : undefined,
+    )
     config.value = cfg
     message.value = { kind: 'ok', text: '已保存。下一次生成笔记会用新配置。' }
   }
@@ -85,7 +100,7 @@ onMounted(refresh)
   <div class="p-6 max-w-3xl">
     <h1 class="text-xl font-bold mb-1">音频转写配置</h1>
     <p class="text-xs text-gray-500 mb-4">
-      选择把视频音频转成文字的引擎。在线引擎（Groq / 必剪 / 快手）走第三方 API，本地 Whisper 需要先下载模型。
+      选择把视频音频转成文字的引擎。在线引擎（Groq / 必剪 / 快手 / 千问 / 豆包）走第三方 API，本地 Whisper 需要先下载模型。
     </p>
 
     <div v-if="loading" class="text-sm text-gray-500">加载中…</div>
@@ -140,6 +155,23 @@ onMounted(refresh)
             </tr>
           </tbody>
         </table>
+      </section>
+
+      <section v-if="isCloud" class="section-card">
+        <h2 class="font-semibold">云端供应商</h2>
+        <select v-model="selProvider" class="input">
+          <option v-for="p in providers.filter(p => p.enabled !== 0)" :key="p.id" :value="p.id">
+            {{ p.name }}（{{ p.base_url }}）
+          </option>
+        </select>
+        <input
+          v-model="selModel"
+          class="input mt-2"
+          :placeholder="selType === 'qwen' ? 'qwen3-asr-flash-realtime' : selType === 'doubao' ? 'bigmodel' : 'whisper-1'"
+        >
+        <p class="text-xs text-gray-500 mt-1">
+          豆包/火山供应商的 API Key 请在「供应商」页填写 app_id|access_token 或 JSON 凭据；千问填写 DashScope API Key。
+        </p>
       </section>
 
       <section class="flex items-center gap-3">

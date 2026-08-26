@@ -10,6 +10,7 @@ from app.utils.logger import get_logger
 from app.utils.path_helper import get_model_dir
 
 from app.services.cookie_manager import CookieConfigManager
+from app.services.provider import ProviderService
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from app.transcriber import model_download_state as dl_state
 from ffmpeg_helper import ensure_ffmpeg_or_raise
@@ -46,6 +47,8 @@ def update_cookie(data: CookieUpdateRequest):
 class TranscriberConfigRequest(BaseModel):
     transcriber_type: str
     whisper_model_size: Optional[str] = None
+    transcriber_provider_id: Optional[str] = None
+    transcriber_model: Optional[str] = None
 
 
 AVAILABLE_TRANSCRIBER_TYPES = [
@@ -53,6 +56,9 @@ AVAILABLE_TRANSCRIBER_TYPES = [
     {"value": "bcut", "label": "必剪（在线）"},
     {"value": "kuaishou", "label": "快手（在线）"},
     {"value": "groq", "label": "Groq（在线）"},
+    {"value": "openai-compatible", "label": "OpenAI 兼容批量接口"},
+    {"value": "qwen", "label": "千问 ASR（百炼实时）"},
+    {"value": "doubao", "label": "豆包/火山 ASR（实时）"},
     {"value": "mlx-whisper", "label": "MLX Whisper（仅macOS）"},
 ]
 
@@ -66,6 +72,15 @@ def get_transcriber_config():
 
     registry = get_registry()
     config = transcriber_config_manager.get_config()
+    providers = [
+        {
+            "id": provider.get("id"),
+            "name": provider.get("name"),
+            "base_url": provider.get("base_url"),
+            "enabled": provider.get("enabled", 1),
+        }
+        for provider in ProviderService.get_all_providers_safe()
+    ]
     return R.success(data={
         **config,
         "available_types": AVAILABLE_TRANSCRIBER_TYPES,
@@ -74,6 +89,7 @@ def get_transcriber_config():
         "whisper_builtin_models": BUILTIN_WHISPER_MODELS,
         "whisper_custom_models": registry.get_custom_models(),
         "mlx_whisper_available": MLX_WHISPER_AVAILABLE,
+        "transcriber_providers": providers,
     })
 
 
@@ -114,6 +130,8 @@ def update_transcriber_config(data: TranscriberConfigRequest):
     config = transcriber_config_manager.update_config(
         transcriber_type=data.transcriber_type,
         whisper_model_size=data.whisper_model_size,
+        transcriber_provider_id=data.transcriber_provider_id,
+        transcriber_model=data.transcriber_model,
     )
     return R.success(data=config)
 

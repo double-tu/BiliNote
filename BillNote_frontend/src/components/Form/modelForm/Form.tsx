@@ -70,6 +70,7 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
   const [modelOptions, setModelOptions] = useState<IModel[]>([]) // ⚡新增，保存模型列表
   const [models, setModels]= useState([])
   const [modelLoading, setModelLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
   const randomColor = ()=>{
     return '#' + Math.floor(Math.random() * 16777215).toString(16)
   }
@@ -157,9 +158,10 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
         toast.success('测试连通性成功 🎉')
 
     } catch (error) {
-
-      toast.error(`连接失败: ${data.data.msg || '未知错误'}`)
-      // toast.error('测试连通性异常')
+      const message = error && typeof error === 'object' && 'msg' in error
+        ? String((error as { msg?: unknown }).msg || '未知错误')
+        : error instanceof Error ? error.message : '未知错误'
+      toast.error(`连接失败: ${message}`)
     } finally {
       setTesting(false)
     }
@@ -191,16 +193,24 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
 
   // 保存Provider信息
   const onProviderSubmit = async (values: ProviderFormValues) => {
-    if (isEditMode) {
-      await updateProvider({ ...values, id: id! })
-      toast.success('更新供应商成功')
-    } else {
-       id = await addNewProvider({ ...values })
-
-      toast.success('新增供应商成功')
+    setSaving(true)
+    try {
+      if (isEditMode) {
+        await updateProvider({ ...values, id: id! })
+        toast.success('更新供应商成功')
+      } else {
+        const createdId = await addNewProvider({ ...values })
+        if (!createdId) throw new Error('后端未返回新供应商 ID')
+        id = createdId
+        toast.success('新增供应商成功')
+      }
+      providerForm.reset(values)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '保存供应商失败'
+      toast.error(message)
+    } finally {
+      setSaving(false)
     }
-    // 刷新页面
-
   }
 
   // 保存Model信息
@@ -247,7 +257,18 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
               <FormItem className="flex items-center gap-4">
                 <FormLabel className="w-24 text-right">API Key</FormLabel>
                 <FormControl>
-                  <Input {...field} className="flex-1" />
+                  <Input
+                    {...field}
+                    type="password"
+                    autoComplete="off"
+                    placeholder={isBuiltIn ? '已配置的密钥已脱敏；点击后输入新密钥' : '请输入 API Key'}
+                    onFocus={event => {
+                      if (String(field.value || '').includes('*')) {
+                        providerForm.setValue('apiKey', '', { shouldDirty: true })
+                      }
+                    }}
+                    className="flex-1"
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -283,8 +304,8 @@ const ProviderForm = ({ isCreate = false }: { isCreate?: boolean }) => {
             )}
           />
           <div className="pt-2">
-            <Button type="submit" disabled={!providerForm.formState.isDirty}>
-              {isEditMode ? '保存修改' : '保存创建'}
+            <Button type="submit" disabled={saving}>
+              {saving ? '保存中...' : isEditMode ? '保存修改' : '保存创建'}
             </Button>
           </div>
         </form>

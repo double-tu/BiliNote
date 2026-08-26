@@ -25,6 +25,14 @@
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "models": ["qwen-plus", "qwen-turbo", "qwen-max", "qwen-long"]
   },
+  {
+    "id": "volcengine",
+    "name": "豆包/火山 ASR",
+    "type": "built-in",
+    "logo": "Doubao",
+    "api_key": "",
+    "base_url": "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
+  },
     {
     "id": "Claude",
     "name": "Claude",

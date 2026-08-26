@@ -53,6 +53,13 @@ export interface Task {
     quality: string
     model_name: string
     provider_id: string
+    style?: string
+    extras?: string
+    format?: string[]
+    video_understanding?: boolean
+    force_transcription?: boolean
+    video_interval?: number
+    grid_size?: number[]
   }
 }
 

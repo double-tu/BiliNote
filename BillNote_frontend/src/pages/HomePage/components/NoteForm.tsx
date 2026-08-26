@@ -57,6 +57,7 @@ const formSchema = z
     style: z.string().nonempty('请选择笔记生成风格'),
     extras: z.string().optional(),
     video_understanding: z.boolean().optional(),
+    force_transcription: z.boolean().optional(),
     video_interval: z.coerce.number().min(1).max(30).default(6).optional(),
     grid_size: z
       .tuple([z.coerce.number().min(1).max(10), z.coerce.number().min(1).max(10)])
@@ -151,6 +152,7 @@ const NoteForm = () => {
       video_interval: 6,
       grid_size: [2, 2],
       format: [],
+      force_transcription: false,
     },
   })
   const currentTask = getCurrentTask()
@@ -185,6 +187,7 @@ const NoteForm = () => {
       screenshot: formData.screenshot ?? false,
       link: formData.link ?? false,
       video_understanding: formData.video_understanding ?? false,
+      force_transcription: formData.force_transcription ?? false,
       video_interval: formData.video_interval ?? 6,
       grid_size: formData.grid_size ?? [2, 2],
       format: formData.format ?? [],
@@ -228,6 +231,7 @@ const NoteForm = () => {
         values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
       provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
       task_id: currentTaskId || '',
+      force_transcription: values.force_transcription ?? false,
     }
     if (currentTaskId) {
       retryTask(currentTaskId, payload)
@@ -474,6 +478,28 @@ const NoteForm = () => {
               )}
             />
           </div>
+          {/* 字幕优先：默认使用平台字幕，无字幕时自动转写；勾选后强制使用语音转写 */}
+          <SectionHeader
+            title="语音转文字"
+            tip="默认优先使用 B 站/YouTube 提供的字幕；没有字幕时自动进行语音转写"
+          />
+          <FormField
+            control={form.control}
+            name="force_transcription"
+            render={({ field }) => (
+              <FormItem>
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    checked={field.value ?? false}
+                    onCheckedChange={value => field.onChange(value === true)}
+                  />
+                  <FormLabel>强制语音转写（忽略平台字幕）</FormLabel>
+                </div>
+                <FormMessage />
+              </FormItem>
+            )}
+          />
+
           {/* 视频理解 */}
           <SectionHeader title="视频理解" tip="将视频截图发给多模态模型辅助分析" />
           <div className="flex flex-col gap-2">

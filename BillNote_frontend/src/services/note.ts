@@ -12,6 +12,8 @@ export const generateNote = async (data: {
   style: string
   extras?: string
   video_understand?: boolean
+  video_understanding?: boolean
+  force_transcription?: boolean
   video_interval?: number
   grid_size: Array<number>
 }) => {

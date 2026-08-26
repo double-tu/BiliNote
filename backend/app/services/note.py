@@ -69,6 +69,9 @@ class NoteGenerator:
         from app.services.transcriber_config_manager import TranscriberConfigManager
         config_manager = TranscriberConfigManager()
         self.model_size: str = config_manager.get_whisper_model_size()
+        config = config_manager.get_config()
+        self.transcriber_provider_id: str = config.get("transcriber_provider_id", "openai")
+        self.transcriber_model: str = config.get("transcriber_model", "whisper-1")
         self.device: Optional[str] = None
         self.transcriber_type: str = config_manager.get_transcriber_type()
         self.transcriber: Transcriber = self._init_transcriber()
@@ -96,6 +99,7 @@ class NoteGenerator:
         video_understanding: bool = False,
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
+        force_transcription: bool = False,
     ) -> NoteResult | None:
         """
         主流程：按步骤依次下载、转写、GPT 总结、截图/链接处理、存库、返回 NoteResult。
@@ -115,6 +119,7 @@ class NoteGenerator:
         :param video_understanding: 是否需要视频拼图理解（生成缩略图）
         :param video_interval: 视频帧截取间隔（秒），仅在 video_understanding 为 True 时生效
         :param grid_size: 生成缩略图时的网格大小，如 [3, 3]
+        :param force_transcription: 是否忽略平台字幕，强制使用语音转写
         :return: NoteResult 对象，包含 markdown 文本、转写结果和音频元信息
         """
         if grid_size is None:
@@ -133,11 +138,12 @@ class NoteGenerator:
             audio_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_audio.json"
             transcript_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_transcript.json"
             markdown_cache_file = NOTE_OUTPUT_DIR / f"{task_id}_markdown.md"
-            # 1. 获取字幕/转写：优先缓存 → 平台字幕 → 音频转写
+            # 1. 获取字幕/转写：默认优先缓存 → 平台字幕 → 音频转写；
+            #    force_transcription 模式下跳过缓存和平台字幕，直接走音频转写。
             transcript = None
 
-            # 尝试读取缓存
-            if transcript_cache_file.exists():
+            # 尝试读取缓存（强制转写时必须跳过，避免误用旧结果）
+            if not force_transcription and transcript_cache_file.exists():
                 logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
                 try:
                     data = json.loads(transcript_cache_file.read_text(encoding="utf-8"))
@@ -152,7 +158,7 @@ class NoteGenerator:
                     logger.warning(f"加载转写缓存失败: {e}")
 
             # 缓存没有，尝试获取平台字幕
-            if transcript is None:
+            if transcript is None and not force_transcription:
                 logger.info("尝试获取平台字幕（优先于音频下载）...")
                 try:
                     transcript = downloader.download_subtitles(video_url)
@@ -197,6 +203,7 @@ class NoteGenerator:
                     transcript_cache_file=transcript_cache_file,
                     status_phase=TaskStatus.TRANSCRIBING,
                     task_id=task_id,
+                    force_transcription=force_transcription,
                 )
 
             # 3. GPT 总结
@@ -262,10 +269,16 @@ class NoteGenerator:
             raise Exception(f"不支持的转写器：{self.transcriber_type}")
 
         logger.info(f"使用转写器：{self.transcriber_type}")
-        return get_transcriber(
-            transcriber_type=self.transcriber_type,
-            model_size=self.model_size,
-        )
+        kwargs = {
+            "transcriber_type": self.transcriber_type,
+            "model_size": self.model_size,
+        }
+        if self.transcriber_type in ("openai-compatible", "qwen", "doubao"):
+            kwargs.update(
+                provider_id=getattr(self, "transcriber_provider_id", "openai"),
+                model=getattr(self, "transcriber_model", "whisper-1"),
+            )
+        return get_transcriber(**kwargs)
 
     def _get_gpt(self, model_name: Optional[str], provider_id: Optional[str]) -> GPT:
         """
@@ -480,6 +493,7 @@ class NoteGenerator:
         transcript_cache_file: Path,
         status_phase: TaskStatus,
         task_id: Optional[str] = None,
+        force_transcription: bool = False,
     ) -> TranscriptResult | None:
         """
         优先获取平台字幕，没有则 fallback 到音频转写
@@ -494,8 +508,8 @@ class NoteGenerator:
         """
         self._update_status(task_id, status_phase)
 
-        # 已有缓存，直接返回
-        if transcript_cache_file.exists():
+        # 已有缓存，直接返回（强制转写时跳过旧缓存）
+        if not force_transcription and transcript_cache_file.exists():
             logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
             try:
                 data = json.loads(transcript_cache_file.read_text(encoding="utf-8"))
@@ -504,7 +518,15 @@ class NoteGenerator:
             except Exception as e:
                 logger.warning(f"加载转写缓存失败，将重新获取：{e}")
 
-        # 1. 先尝试获取平台字幕
+        # 1. 先尝试获取平台字幕（强制转写时跳过）
+        if force_transcription:
+            return self._transcribe_audio(
+                audio_file=audio_file,
+                transcript_cache_file=transcript_cache_file,
+                status_phase=status_phase,
+                force_transcription=True,
+            )
+
         logger.info("尝试获取平台字幕...")
         try:
             transcript = downloader.download_subtitles(video_url)
@@ -526,6 +548,7 @@ class NoteGenerator:
             audio_file=audio_file,
             transcript_cache_file=transcript_cache_file,
             status_phase=status_phase,
+            force_transcription=False,
         )
 
     def _transcribe_audio(
@@ -533,6 +556,7 @@ class NoteGenerator:
         audio_file: str,
         transcript_cache_file: Path,
         status_phase: TaskStatus,
+        force_transcription: bool = False,
     ) -> TranscriptResult | None:
         """
         1. 检查转写缓存；若存在则尝试加载，否则调用转写器生成并缓存。
@@ -547,7 +571,7 @@ class NoteGenerator:
         self._update_status(task_id, status_phase)
 
         # 已有缓存，尝试加载
-        if transcript_cache_file.exists():
+        if not force_transcription and transcript_cache_file.exists():
             logger.info(f"检测到转写缓存 ({transcript_cache_file})，尝试读取")
             try:
                 data = json.loads(transcript_cache_file.read_text(encoding="utf-8"))

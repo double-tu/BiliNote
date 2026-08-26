@@ -60,15 +60,12 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
     }
     try {
       const res = await addProvider(payload)
-      if (res.data.code === 0) {
-        const item = res.data.data
-        console.log('Provider ', item)
-
-        await get().fetchProviderList()
-        return  item
-      }
+      // axios 响应拦截器已解包 ResponseWrapper，res 直接就是后端返回的 ID。
+      await get().fetchProviderList()
+      return typeof res === 'string' ? res : res?.id
     } catch (error) {
       console.error('Error fetching provider:', error)
+      throw error
     }
   },
   // 按 id 获取单个 provider
@@ -88,6 +85,7 @@ export const useProviderStore = create<ProviderStore>((set, get) => ({
       await get().fetchProviderList()
     } catch (error) {
       console.error('Error updating provider:', error)
+      throw error
     }
   },
   getProviderList: () => get().provider,

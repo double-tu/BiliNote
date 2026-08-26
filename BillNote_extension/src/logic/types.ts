@@ -148,7 +148,7 @@ export interface ProviderCreatePayload {
   logo?: string
 }
 
-export type TranscriberType = 'fast-whisper' | 'bcut' | 'kuaishou' | 'groq' | 'mlx-whisper'
+export type TranscriberType = 'fast-whisper' | 'bcut' | 'kuaishou' | 'groq' | 'openai-compatible' | 'qwen' | 'doubao' | 'mlx-whisper'
 export type WhisperModelSize = 'tiny' | 'base' | 'small' | 'medium' | 'large-v3' | 'large-v3-turbo'
 
 export interface TranscriberOption {
@@ -162,6 +162,9 @@ export interface TranscriberConfig {
   available_types: TranscriberOption[]
   whisper_model_sizes: WhisperModelSize[]
   mlx_whisper_available: boolean
+  transcriber_provider_id?: string
+  transcriber_model?: string
+  transcriber_providers?: Array<{ id: string, name: string, base_url?: string, enabled: number }>
 }
 
 export interface WhisperModelStatus {

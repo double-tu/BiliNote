@@ -42,9 +42,16 @@ def check_ffmpeg_exists() -> bool:
     """
     ffmpeg_bin_path = os.getenv("FFMPEG_BIN_PATH")
     logger.info(f"FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
-    if ffmpeg_bin_path and os.path.isdir(ffmpeg_bin_path):
-        os.environ["PATH"] = ffmpeg_bin_path + os.pathsep + os.environ.get("PATH", "")
-        logger.info(f"使用FFMPEG_BIN_PATH: {ffmpeg_bin_path}")
+    if ffmpeg_bin_path:
+        # Windows 用户有时填写 ffmpeg.exe 的完整路径，有时填写其 bin 目录；两者都支持。
+        configured = ffmpeg_bin_path.strip().strip('"')
+        if os.path.isfile(configured):
+            ffmpeg_dir = os.path.dirname(configured)
+            os.environ["PATH"] = ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
+            logger.info(f"使用FFMPEG_BIN_PATH 指定的可执行文件: {configured}")
+        elif os.path.isdir(configured):
+            os.environ["PATH"] = configured + os.pathsep + os.environ.get("PATH", "")
+            logger.info(f"使用FFMPEG_BIN_PATH: {configured}")
     else:
         # 遍历系统PATH寻找ffmpeg.exe
         system_path = os.environ.get("PATH", "")

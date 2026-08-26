@@ -41,18 +41,32 @@ class TranscriberConfigManager:
                 "whisper_model_size",
                 os.getenv("WHISPER_MODEL_SIZE", "tiny"),
             ),
+            "transcriber_provider_id": data.get(
+                "transcriber_provider_id",
+                os.getenv("TRANSCRIBER_PROVIDER_ID", "openai"),
+            ),
+            "transcriber_model": data.get(
+                "transcriber_model",
+                os.getenv("TRANSCRIBER_MODEL", "whisper-1"),
+            ),
         }
 
     def update_config(
         self,
         transcriber_type: str,
         whisper_model_size: Optional[str] = None,
+        transcriber_provider_id: Optional[str] = None,
+        transcriber_model: Optional[str] = None,
     ) -> Dict[str, Any]:
         """更新转写器配置并持久化。"""
         data = self._read()
         data["transcriber_type"] = transcriber_type
         if whisper_model_size is not None:
             data["whisper_model_size"] = whisper_model_size
+        if transcriber_provider_id is not None:
+            data["transcriber_provider_id"] = transcriber_provider_id
+        if transcriber_model is not None:
+            data["transcriber_model"] = transcriber_model
         self._write(data)
         return self.get_config()
 
@@ -66,7 +80,7 @@ class TranscriberConfigManager:
         """当前转写器是否就绪可用。
 
         返回 {ready, transcriber_type, model_size, downloading, reason}：
-          - 在线引擎 (groq/bcut/kuaishou)：永远 ready（不需要本地模型）
+          - 在线引擎 (groq/bcut/kuaishou/openai-compatible)：永远 ready（不需要本地模型）
           - fast-whisper：检查 whisper-{size}/model.bin 落盘
           - mlx-whisper：检查 {repo_id}/config.json 落盘
         给 /generate_note 入口做「开始视频前先确认模型下载好」的门禁用。

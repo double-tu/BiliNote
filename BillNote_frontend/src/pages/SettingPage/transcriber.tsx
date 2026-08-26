@@ -26,6 +26,8 @@ import {
 
 const isWhisperType = (type: string) =>
   type === 'fast-whisper' || type === 'mlx-whisper'
+const isOpenAICompatibleType = (type: string) => type === 'openai-compatible'
+const isNativeCloudType = (type: string) => type === 'qwen' || type === 'doubao'
 
 export default function Transcriber() {
   const [config, setConfig] = useState<TranscriberConfig | null>(null)
@@ -33,6 +35,8 @@ export default function Transcriber() {
   const [saving, setSaving] = useState(false)
   const [selectedType, setSelectedType] = useState('')
   const [selectedModelSize, setSelectedModelSize] = useState('')
+  const [selectedProviderId, setSelectedProviderId] = useState('openai')
+  const [selectedTranscriberModel, setSelectedTranscriberModel] = useState('whisper-1')
   const [modelStatuses, setModelStatuses] = useState<ModelStatus[]>([])
   const [mlxModelStatuses, setMlxModelStatuses] = useState<ModelStatus[]>([])
   const [mlxAvailable, setMlxAvailable] = useState(false)
@@ -88,6 +92,8 @@ export default function Transcriber() {
         setConfig(data)
         setSelectedType(data.transcriber_type)
         setSelectedModelSize(data.whisper_model_size)
+        setSelectedProviderId(data.transcriber_provider_id || 'openai')
+        setSelectedTranscriberModel(data.transcriber_model || 'whisper-1')
       } catch {
         toast.error('获取转写器配置失败')
       } finally {
@@ -97,6 +103,21 @@ export default function Transcriber() {
     load()
     fetchModelsStatus()
   }, [fetchModelsStatus])
+
+  // 原生云端引擎使用各自的内置供应商和默认模型，减少首次配置时选错端点的可能。
+  useEffect(() => {
+    if (selectedType === 'qwen') {
+      setSelectedProviderId('qwen')
+      if (!selectedTranscriberModel || selectedTranscriberModel === 'whisper-1') {
+        setSelectedTranscriberModel('qwen3-asr-flash-realtime')
+      }
+    } else if (selectedType === 'doubao') {
+      setSelectedProviderId('volcengine')
+      if (!selectedTranscriberModel || selectedTranscriberModel === 'whisper-1') {
+        setSelectedTranscriberModel('bigmodel')
+      }
+    }
+  }, [selectedType, selectedTranscriberModel])
 
   // 有下载中的模型时自动轮询状态
   useEffect(() => {
@@ -133,11 +154,24 @@ export default function Transcriber() {
 
     setSaving(true)
     try {
-      const payload: { transcriber_type: string; whisper_model_size?: string } = {
+      const payload: {
+        transcriber_type: string
+        whisper_model_size?: string
+        transcriber_provider_id?: string
+        transcriber_model?: string
+      } = {
         transcriber_type: selectedType,
       }
       if (isWhisperType(selectedType)) {
         payload.whisper_model_size = selectedModelSize
+      }
+      if (isOpenAICompatibleType(selectedType) || isNativeCloudType(selectedType)) {
+        if (!selectedProviderId || !selectedTranscriberModel.trim()) {
+          toast.error('请选择已配置的供应商并填写转录模型名称')
+          return
+        }
+        payload.transcriber_provider_id = selectedProviderId
+        payload.transcriber_model = selectedTranscriberModel.trim()
       }
       await updateTranscriberConfig(payload)
       toast.success('转写器配置已保存')
@@ -268,6 +302,46 @@ export default function Transcriber() {
               <p className="text-xs text-neutral-400">
                 模型越大精度越高，但速度更慢、占用更多显存
               </p>
+            </div>
+          )}
+
+          {(isOpenAICompatibleType(selectedType) || isNativeCloudType(selectedType)) && (
+            <div className="space-y-4 rounded-lg border border-blue-100 bg-blue-50/50 p-4">
+              <div className="space-y-2">
+                <label className="text-sm font-medium">语音转写供应商</label>
+                <Select value={selectedProviderId} onValueChange={setSelectedProviderId}>
+                  <SelectTrigger className="w-full max-w-md">
+                    <SelectValue placeholder="选择模型供应商" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(config.transcriber_providers || []).filter(p => p.enabled !== 0).map(provider => (
+                      <SelectItem key={provider.id} value={provider.id}>
+                        {provider.name}（{provider.base_url}）
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <label className="text-sm font-medium">转录模型名称</label>
+                <Input
+                  value={selectedTranscriberModel}
+                  onChange={event => setSelectedTranscriberModel(event.target.value)}
+                  placeholder={selectedType === 'qwen' ? '例如 qwen3-asr-flash-realtime 或 qwen-audio-3.0-asr-flash' : selectedType === 'doubao' ? '例如 bigmodel' : '例如 whisper-1、whisper-large-v3'}
+                  className="max-w-md"
+                />
+              </div>
+              <Alert className="text-sm">
+                <AlertDescription>
+                  {isOpenAICompatibleType(selectedType)
+                    ? 'OpenAI 兼容接口的长音频会在本地分片后逐段上传。'
+                    : selectedType === 'qwen'
+                      ? '千问 realtime 模型使用实时 WebSocket；填写 qwen-audio-3.0-asr-flash 等非 realtime 模型时会改用文件 HTTP 接口。'
+                      : '豆包/火山使用原生实时 WebSocket；后端会将本地音频转换为 16kHz 单声道 PCM 后发送。'}
+                  {' '}请按供应商文档填写模型名和 API Key。
+                  {selectedType === 'doubao' && ' 豆包/火山 API Key 格式：app_id|access_token，或 JSON 凭据。'}
+                </AlertDescription>
+              </Alert>
             </div>
           )}
 

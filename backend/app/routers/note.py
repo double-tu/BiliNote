@@ -48,6 +48,7 @@ class VideoRequest(BaseModel):
     style: str = None
     extras: Optional[str]=None
     video_understanding: Optional[bool] = False
+    force_transcription: Optional[bool] = False
     video_interval: Optional[int] = 0
     grid_size: Optional[list] = []
     # 客户端（如浏览器插件）已经在用户浏览器里抓到字幕，直接传给后端复用，
@@ -124,7 +125,7 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-                  video_interval=0, grid_size=[]
+                  video_interval=0, grid_size=[], force_transcription: bool = False
                   ):
 
     if not model_name or not provider_id:
@@ -144,6 +145,7 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
             extras=extras,
             screenshot=screenshot,
             video_understanding=video_understanding,
+            force_transcription=force_transcription,
             video_interval=video_interval,
             grid_size=grid_size,
         )
@@ -191,8 +193,9 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
     try:
         # 就绪门禁：本地转写引擎（fast-whisper / mlx-whisper）必须等模型下载完才能跑视频，
         # 否则任务会卡在首次下载（慢 / OOM / 截断），用户只看到一个静默失败的任务。
-        # 客户端已抓好字幕（prefetched_transcript）则不需要转写，跳过检查。
-        if not data.prefetched_transcript:
+        # 仅在用户明确强制语音转写时提前检查本地模型。默认字幕优先模式
+        # 可能完全不需要 ASR，不能因为本地模型未下载而阻断字幕任务。
+        if data.force_transcription:
             from app.services.transcriber_config_manager import TranscriberConfigManager
             readiness = TranscriberConfigManager().is_model_ready()
             if not readiness["ready"]:
@@ -237,7 +240,8 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
 
         background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
                                   data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                                  data.extras, data.video_understanding, data.video_interval, data.grid_size)
+                                  data.extras, data.video_understanding, data.video_interval, data.grid_size,
+                                  data.force_transcription)
         return R.success({"task_id": task_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

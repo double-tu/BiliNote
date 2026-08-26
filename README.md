@@ -302,6 +302,24 @@ pnpm dev
 
 访问：`http://localhost:3015`
 
+#### 4. 配置云端语音转写（可选）
+
+除了本地 Faster Whisper、必剪、快手和 Groq，源码版还支持 **OpenAI 音频转写兼容接口**。在「设置 → 模型供应商」中配置供应商的 API Key 和 Base URL，然后在「设置 → 音频转写配置」选择「OpenAI 兼容」并填写模型名，例如 `whisper-1` 或供应商文档中的模型名。
+
+这类接口适用于 OpenAI、Groq、以及提供 `audio.transcriptions` 兼容协议的第三方网关。长音频由后端使用 FFmpeg 在本地切成约 10 分钟、16kHz 单声道 MP3 后逐段上传，并自动合并文本和时间轴；默认单段上限为 20MB，可通过 `.env` 调整：
+
+```env
+TRANSCRIBER_TYPE=openai-compatible
+TRANSCRIBER_PROVIDER_ID=openai
+TRANSCRIBER_MODEL=whisper-1
+TRANSCRIBER_MAX_UPLOAD_MB=20
+TRANSCRIBER_CHUNK_SECONDS=600
+```
+
+豆包/火山和千问的原生实时 WebSocket 已接入：选择「豆包/火山 ASR（实时）」或「千问 ASR（百炼实时）」即可。千问供应商使用 DashScope API Key；豆包/火山供应商的 API Key 填 `app_id|access_token`，或填包含 `app_id`、`access_token`、可选 `resource_id` 的 JSON。两者都由本地 FFmpeg 转换为 16kHz 单声道 PCM 后发送，长音频不会一次性读入内存。
+
+千问的非 realtime 文件模型（例如 `qwen-audio-3.0-asr-flash`）会改走百炼同步文件接口，不使用实时 WebSocket。该接口单次最多 5 分钟、10MB；后端会先用 FFmpeg 切成约 4 分钟的 WAV 分片，再逐段调用并合并文本。更长的异步模型 `qwen-audio-3.0-asr-flash-filetrans` 支持公网 URL、最长 12 小时/2GB，但当前桌面部署未内置 OSS 公网托管，因此不会假装支持本地文件直传。
+
 ## ⚙️ 依赖说明
 
 ### 🎬 FFmpeg
