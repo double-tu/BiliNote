@@ -17,7 +17,7 @@ from app.exceptions.note import NoteError
 from app.services.note import NoteGenerator, logger
 from app.services.task_serial_executor import task_serial_executor
 from app.utils.response import ResponseWrapper as R
-from app.utils.url_parser import extract_video_id, normalize_video_url
+from app.utils.url_parser import extract_first_http_url, extract_video_id, normalize_video_url
 from app.validators.video_url_validator import is_supported_video_url
 from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
@@ -43,6 +43,8 @@ class VideoRequest(BaseModel):
     link: Optional[bool] = False
     model_name: str
     provider_id: str
+    visual_model_name: Optional[str] = None
+    visual_provider_id: Optional[str] = None
     task_id: Optional[str] = None
     format: Optional[list] = []
     style: str = None
@@ -63,6 +65,8 @@ class VideoRequest(BaseModel):
         # 后续校验和 yt-dlp 下载拿到的都是干净链接
         if isinstance(data, dict) and data.get("platform") == "bilibili" and data.get("video_url"):
             data["video_url"] = normalize_video_url(str(data["video_url"]))
+        elif isinstance(data, dict) and data.get("platform") == "xiaohongshu" and data.get("video_url"):
+            data["video_url"] = extract_first_http_url(str(data["video_url"])) or data["video_url"]
         return data
 
     @field_validator("video_url")
@@ -125,7 +129,8 @@ def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
 def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
                   link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
                   _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-                  video_interval=0, grid_size=[], force_transcription: bool = False
+                  video_interval=0, grid_size=[], force_transcription: bool = False,
+                  visual_model_name: str = None, visual_provider_id: str = None
                   ):
 
     if not model_name or not provider_id:
@@ -146,6 +151,8 @@ def run_note_task(task_id: str, video_url: str, platform: str, quality: Download
             screenshot=screenshot,
             video_understanding=video_understanding,
             force_transcription=force_transcription,
+            visual_model_name=visual_model_name,
+            visual_provider_id=visual_provider_id,
             video_interval=video_interval,
             grid_size=grid_size,
         )
@@ -241,7 +248,7 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
         background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
                                   data.screenshot, data.model_name, data.provider_id, data.format, data.style,
                                   data.extras, data.video_understanding, data.video_interval, data.grid_size,
-                                  data.force_transcription)
+                                  data.force_transcription, data.visual_model_name, data.visual_provider_id)
         return R.success({"task_id": task_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -280,7 +287,13 @@ def get_task_status(task_id: str):
                 })
 
         if status == TaskStatus.FAILED.value:
-            return R.error(message or "任务失败", code=500)
+            # 任务执行失败是状态查询的正常结果，不是状态接口本身失败。
+            # 返回成功响应，让前端能区分“后端明确失败”和“网络/服务不可用”。
+            return R.success({
+                "status": TaskStatus.FAILED.value,
+                "message": message or "任务失败",
+                "task_id": task_id,
+            })
 
         # 处理中状态
         return R.success({
@@ -309,8 +322,14 @@ def get_task_status(task_id: str):
 
 @router.get("/image_proxy")
 async def image_proxy(request: Request, url: str):
+    image_host = urlparse(url).netloc.lower()
+    referer = (
+        "https://www.xiaohongshu.com/"
+        if "xhscdn.com" in image_host or "xiaohongshu.com" in image_host
+        else "https://www.bilibili.com/"
+    )
     headers = {
-        "Referer": "https://www.bilibili.com/",
+        "Referer": referer,
         "User-Agent": request.headers.get("User-Agent", ""),
     }
 

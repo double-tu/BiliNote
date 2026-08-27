@@ -8,7 +8,7 @@ import {
   FormMessage,
 } from '@/components/ui/form.tsx'
 import { useEffect,useState } from 'react'
-import { useForm, useWatch } from 'react-hook-form'
+import { useForm, useWatch, type FieldErrors } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
@@ -45,6 +45,51 @@ import toast from 'react-hot-toast'
 /** 用户粘贴的链接常缺协议头（如 bilibili.com/...），无任何 scheme 时自动补 https:// */
 const withScheme = (url: string) => (/^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`)
 
+/** 小红书常复制为整段分享文案；提交时只保留其中的链接和 xsec_token。 */
+const normalizeRemoteVideoInput = (value: string, platform: string) => {
+  if (platform === 'xiaohongshu') {
+    const matchedUrl = value.match(/https?:\/\/[^\s]+/i)?.[0]
+    return (matchedUrl || value.trim()).replace(/[，。；;、)\]}>"'”’]+$/, '')
+  }
+  return withScheme(value).replace(/[，。；;、),\]}>"'”’]+$/, '')
+}
+
+const createEmptyFormValues = (modelName = '') => ({
+  platform: 'bilibili',
+  video_url: '',
+  quality: 'medium' as const,
+  model_name: modelName,
+  style: 'minimal',
+  video_interval: 6,
+  grid_size: [2, 2] as [number, number],
+  format: [] as string[],
+  screenshot: false,
+  link: false,
+  video_understanding: false,
+  force_transcription: false,
+  visual_model_name: '',
+})
+
+const LAST_CONFIG_KEY = 'bilinote-last-note-config'
+
+const splitBatchInputs = (value: string, platform: string) => {
+  const lines = value
+    .split(/\r?\n/)
+    .map(item => item.trim())
+    .filter(Boolean)
+  // 只要粘贴内容中包含完整 HTTP URL，就优先提取 URL。这样可以兼容
+  // 小红书的多行分享文案，以及“说明文字 + 链接”的粘贴结果。
+  const explicitUrls = value.match(/https?:\/\/[^\s]+/gi) || []
+  const candidates = platform === 'local'
+    ? lines
+    : explicitUrls.length > 0
+      ? explicitUrls
+      : lines
+  return Array.from(new Set(candidates
+    .map(item => normalizeRemoteVideoInput(item, platform))
+    .filter(Boolean)))
+}
+
 const formSchema = z
   .object({
     video_url: z.string().optional(),
@@ -58,6 +103,7 @@ const formSchema = z
     extras: z.string().optional(),
     video_understanding: z.boolean().optional(),
     force_transcription: z.boolean().optional(),
+    visual_model_name: z.string().optional(),
     video_interval: z.coerce.number().min(1).max(30).default(6).optional(),
     grid_size: z
       .tuple([z.coerce.number().min(1).max(10), z.coerce.number().min(1).max(10)])
@@ -76,7 +122,12 @@ const formSchema = z
       }
       else {
         try {
-          const url = new URL(withScheme(video_url))
+          // 批量模式下 video_url 可能包含多行链接；校验第一条即可，实际提交
+          // 会在 onSubmit 中逐条拆分并分别提交。
+          const firstCandidate = video_url.match(/https?:\/\/[^\s]+/i)?.[0]
+            || video_url.split(/\r?\n/).find(item => item.trim())
+            || video_url
+          const url = new URL(normalizeRemoteVideoInput(firstCandidate, platform))
           if (!['http:', 'https:'].includes(url.protocol))
             throw new Error()
         }
@@ -136,6 +187,15 @@ const NoteForm = () => {
   const navigate = useNavigate();
   const [isUploading, setIsUploading] = useState(false)
   const [uploadSuccess, setUploadSuccess] = useState(false)
+  const [batchMode, setBatchMode] = useState(false)
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const [hasSavedConfig, setHasSavedConfig] = useState(() => {
+    try {
+      return Boolean(localStorage.getItem(LAST_CONFIG_KEY))
+    } catch {
+      return false
+    }
+  })
   /* ---- 全局状态 ---- */
   const { addPendingTask, currentTaskId, setCurrentTask, getCurrentTask, retryTask } =
     useTaskStore()
@@ -144,16 +204,7 @@ const NoteForm = () => {
   /* ---- 表单 ---- */
   const form = useForm<NoteFormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: {
-      platform: 'bilibili',
-      quality: 'medium',
-      model_name: modelList[0]?.model_name || '',
-      style: 'minimal',
-      video_interval: 6,
-      grid_size: [2, 2],
-      format: [],
-      force_transcription: false,
-    },
+    defaultValues: createEmptyFormValues(modelList[0]?.model_name || ''),
   })
   const currentTask = getCurrentTask()
 
@@ -161,6 +212,28 @@ const NoteForm = () => {
   const platform = useWatch({ control: form.control, name: 'platform' }) as string
   const videoUnderstandingEnabled = useWatch({ control: form.control, name: 'video_understanding' })
   const editing = currentTask && currentTask.id
+
+  // 截图选项依赖视频理解。关闭视频理解后，必须同步移除旧的 screenshot
+  // format，避免复选框虽然禁用但提交时仍携带历史值。
+  useEffect(() => {
+    if (videoUnderstandingEnabled) return
+    const formats = form.getValues('format') || []
+    if (formats.includes('screenshot')) {
+      form.setValue(
+        'format',
+        formats.filter(value => value !== 'screenshot'),
+        { shouldDirty: true },
+      )
+    }
+    // 同步清掉依赖视频理解的字段，避免切换任务或重新打开表单时
+    // 残留的截图/视觉模型状态被误显示或提交。
+    if (form.getValues('screenshot')) {
+      form.setValue('screenshot', false, { shouldDirty: true })
+    }
+    if (form.getValues('visual_model_name')) {
+      form.setValue('visual_model_name', '', { shouldDirty: true })
+    }
+  }, [videoUnderstandingEnabled, form])
 
   const goModelAdd = () => {
     navigate("/settings/model");
@@ -188,6 +261,7 @@ const NoteForm = () => {
       link: formData.link ?? false,
       video_understanding: formData.video_understanding ?? false,
       force_transcription: formData.force_transcription ?? false,
+      visual_model_name: formData.visual_model_name ?? '',
       video_interval: formData.video_interval ?? 6,
       grid_size: formData.grid_size ?? [2, 2],
       format: formData.format ?? [],
@@ -223,18 +297,113 @@ const NoteForm = () => {
     }
   }
 
-  const onSubmit = async (values: NoteFormValues) => {
+  const submitForm = async (values: NoteFormValues) => {
     console.log('Not even go here')
-    const payload: NoteFormValues = {
+    const selectedModel = modelList.find(model => model.model_name === values.model_name)
+    if (!selectedModel) {
+      toast.error('当前模型不可用，请重新选择模型')
+      return
+    }
+    const selectedVisualModel = values.visual_model_name
+      ? modelList.find(model => model.model_name === values.visual_model_name)
+      : undefined
+    if (values.visual_model_name && !selectedVisualModel) {
+      toast.error('当前视觉模型不可用，请重新选择视觉模型')
+      return
+    }
+    const saveConfig = () => {
+      try {
+        const config = {
+          platform: values.platform,
+          quality: values.quality,
+          model_name: values.model_name,
+          style: values.style,
+          extras: values.extras || '',
+          format: values.video_understanding
+            ? values.format ?? []
+            : (values.format ?? []).filter(value => value !== 'screenshot'),
+          screenshot: Boolean(values.video_understanding && values.screenshot),
+          link: Boolean(values.link),
+          video_understanding: Boolean(values.video_understanding),
+          force_transcription: Boolean(values.force_transcription),
+          visual_model_name: values.visual_model_name || '',
+          video_interval: values.video_interval ?? 6,
+          grid_size: values.grid_size ?? [2, 2],
+        }
+        localStorage.setItem(LAST_CONFIG_KEY, JSON.stringify(config))
+        setHasSavedConfig(true)
+      } catch {
+        // 浏览器禁用 localStorage 时不影响任务提交。
+      }
+    }
+
+    const safeFormat = values.video_understanding
+      ? values.format ?? []
+      : (values.format ?? []).filter(value => value !== 'screenshot')
+    const normalizedValues = {
       ...values,
+      format: safeFormat,
+      screenshot: Boolean(values.video_understanding && values.screenshot),
+    }
+
+    if (batchMode) {
+      const batchUrls = splitBatchInputs(values.video_url || '', values.platform)
+      if (batchUrls.length === 0) {
+        toast.error('请至少输入一条视频链接')
+        return
+      }
+      if (values.platform === 'local' && batchUrls.length > 1) {
+        toast.error('批量模式暂不支持多个本地文件路径')
+        return
+      }
+
+      saveConfig()
+      const batchResults = await Promise.allSettled(batchUrls.map(videoUrl =>
+        generateNote({
+          ...normalizedValues,
+          provider_id: selectedModel.provider_id,
+          visual_provider_id: selectedVisualModel?.provider_id,
+          video_url: videoUrl,
+          task_id: '',
+        }, { silent: true }).then(response => {
+          if (!response?.task_id) {
+            throw new Error('后端未返回 task_id')
+          }
+          addPendingTask(response.task_id, values.platform, {
+            ...normalizedValues,
+            provider_id: selectedModel.provider_id,
+            visual_provider_id: selectedVisualModel?.provider_id,
+            video_url: videoUrl,
+            task_id: '',
+          })
+          return response
+        }),
+      ))
+      const succeeded = batchResults.filter(result => result.status === 'fulfilled').length
+      const failed = batchResults.length - succeeded
+      if (succeeded > 0) {
+        toast.success(`已提交 ${succeeded} 个任务${failed ? `，${failed} 个提交失败` : ''}`)
+      } else {
+        toast.error('批量任务提交失败，请检查链接和后端状态')
+      }
+      return
+    }
+
+    saveConfig()
+    const payload: NoteFormValues = {
+      ...normalizedValues,
       video_url:
-        values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
-      provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,
+        values.platform === 'local'
+          ? values.video_url
+          : normalizeRemoteVideoInput(values.video_url || '', values.platform),
+      provider_id: selectedModel.provider_id,
       task_id: currentTaskId || '',
       force_transcription: values.force_transcription ?? false,
+      visual_model_name: values.visual_model_name || undefined,
+      visual_provider_id: selectedVisualModel?.provider_id,
     }
     if (currentTaskId) {
-      retryTask(currentTaskId, payload)
+      await retryTask(currentTaskId, payload)
       return
     }
 
@@ -259,24 +428,51 @@ const NoteForm = () => {
       console.error('提交任务失败：', e)
     }
   }
+  // 防止批量请求尚未返回时重复点击，导致同一批链接被重复创建任务。
+  const onSubmit = async (values: NoteFormValues) => {
+    if (isSubmitting) return
+    setIsSubmitting(true)
+    try {
+      await submitForm(values)
+    } finally {
+      setIsSubmitting(false)
+    }
+  }
   const onInvalid = (errors: FieldErrors<NoteFormValues>) => {
     console.warn('表单校验失败：', errors)
     // message.error('请完善所有必填项后再提交')
   }
   const handleCreateNew = () => {
-    // 🔁 这里清空当前任务状态
-    // 比如调用 resetCurrentTask() 或者 navigate 到一个新页面
+    // 清空当前任务和所有与上一条笔记相关的表单状态，尤其是 format.screenshot。
     setCurrentTask(null)
+    form.reset(createEmptyFormValues(modelList[0]?.model_name || ''))
+    setBatchMode(false)
+  }
+
+  const restoreLastConfig = () => {
+    try {
+      const raw = localStorage.getItem(LAST_CONFIG_KEY)
+      if (!raw) return
+      const config = JSON.parse(raw)
+      form.reset({
+        ...createEmptyFormValues(modelList[0]?.model_name || ''),
+        ...config,
+        video_url: '',
+      })
+      toast.success('已还原上次配置，请填写视频链接')
+    } catch {
+      toast.error('还原配置失败')
+    }
   }
   const FormButton = () => {
-    const label = generating ? '正在生成…' : editing ? '重新生成' : '生成笔记'
+    const label = generating ? '正在生成…' : editing ? '重新生成' : batchMode ? '批量生成' : '生成笔记'
 
     return (
       <div className="flex gap-2">
         <Button
           type="submit"
           className={!editing ? 'w-full' : 'w-2/3' + ' bg-primary'}
-          disabled={generating}
+          disabled={generating || isSubmitting}
         >
           {generating && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
           {label}
@@ -302,6 +498,23 @@ const NoteForm = () => {
 
           {/* 视频链接 & 平台 */}
           <SectionHeader title="视频链接" tip="支持 B 站、YouTube 等平台" />
+          <div className="mb-2 flex justify-end gap-2">
+            {!editing && (
+              <Button
+                type="button"
+                variant={batchMode ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setBatchMode(value => !value)}
+              >
+                {batchMode ? '单条模式' : '批量模式'}
+              </Button>
+            )}
+            {!editing && hasSavedConfig && (
+              <Button type="button" variant="outline" size="sm" onClick={restoreLastConfig}>
+                一键还原配置
+              </Button>
+            )}
+          </div>
           <div className="flex gap-2">
             {/* 平台选择 */}
 
@@ -347,7 +560,20 @@ const NoteForm = () => {
                       <Input disabled={!!editing} placeholder="请输入本地视频路径" {...field} />
                     </>
                   ) : (
-                    <Input disabled={!!editing} placeholder="请输入视频网站链接" {...field} />
+                    batchMode ? (
+                      <Textarea
+                        disabled={!!editing}
+                        className="min-h-24"
+                        placeholder="每行粘贴一个视频链接；也支持一次粘贴多条链接"
+                        {...field}
+                      />
+                    ) : (
+                      <Input
+                        disabled={!!editing}
+                        placeholder={platform === 'xiaohongshu' ? '粘贴小红书链接或完整分享文案' : '请输入视频网站链接'}
+                        {...field}
+                      />
+                    )
                   )}
                   <FormMessage style={{ display: 'none' }} />
                 </FormItem>
@@ -499,6 +725,39 @@ const NoteForm = () => {
               </FormItem>
             )}
           />
+          {videoUnderstandingEnabled && (
+            <FormField
+              control={form.control}
+              name="visual_model_name"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>视觉模型（可选）</FormLabel>
+                  <Select
+                    value={field.value || "__same_model__"}
+                    onValueChange={value => field.onChange(value === "__same_model__" ? "" : value)}
+                  >
+                    <FormControl>
+                      <SelectTrigger className="w-full min-w-0 truncate">
+                        <SelectValue placeholder="不指定，使用当前模型直接看图" />
+                      </SelectTrigger>
+                    </FormControl>
+                    <SelectContent>
+                      <SelectItem value="__same_model__">不指定（当前模型直接处理图片）</SelectItem>
+                      {modelList.filter(model => model.capabilities?.supports_vision === true).map(model => (
+                        <SelectItem key={`${model.provider_id}-${model.model_name}`} value={model.model_name}>
+                          {model.model_name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    指定后由视觉模型分析关键帧，当前模型只处理字幕和视觉摘要。
+                  </p>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+          )}
 
           {/* 视频理解 */}
           <SectionHeader title="视频理解" tip="将视频截图发给多模态模型辅助分析" />

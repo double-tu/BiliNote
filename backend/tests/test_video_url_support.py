@@ -45,6 +45,43 @@ class TestVideoUrlSupport(unittest.TestCase):
 
         self.assertTrue(video_url_validator.is_supported_video_url(url))
 
+    def test_extract_xiaohongshu_note_id_from_supported_url_shapes(self):
+        expected_id = "68a1bc2d000000001234abcd"
+        cases = [
+            f"https://www.xiaohongshu.com/explore/{expected_id}",
+            f"https://www.xiaohongshu.com/discovery/item/{expected_id}?xsec_token=token",
+            f"https://www.xiaohongshu.com/item/{expected_id}",
+        ]
+
+        for url in cases:
+            with self.subTest(url=url):
+                self.assertEqual(
+                    url_parser.extract_video_id(url, "xiaohongshu"),
+                    expected_id,
+                )
+
+    def test_accepts_xiaohongshu_full_and_short_urls(self):
+        self.assertTrue(video_url_validator.is_supported_video_url(
+            "https://www.xiaohongshu.com/explore/68a1bc2d000000001234abcd"
+        ))
+        self.assertTrue(video_url_validator.is_supported_video_url(
+            "https://xhslink.com/abc123"
+        ))
+        self.assertTrue(video_url_validator.is_supported_video_url(
+            "https://xhslink.cn/o/3j9OsodA9Nh"
+        ))
+        self.assertFalse(video_url_validator.is_supported_video_url(
+            "https://example.com/path/xiaohongshu.com/explore/68a1bc2d000000001234abcd"
+        ))
+
+    def test_xiaohongshu_request_extracts_url_from_share_text(self):
+        request = video_url_validator.VideoRequest.model_validate({
+            "url": "复制这条内容 https://xhslink.com/abc123 打开小红书查看",
+            "platform": "xiaohongshu",
+        })
+
+        self.assertEqual(str(request.url), "https://xhslink.com/abc123")
+
 
 if __name__ == "__main__":
     unittest.main()

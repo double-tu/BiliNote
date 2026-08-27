@@ -9,6 +9,7 @@ from app.gpt.provider.OpenAI_compatible_provider import OpenAICompatibleProvider
 from app.models.model_config import ModelConfig
 from app.services.provider import ProviderService
 from app.utils.logger import get_logger
+from app.services.model_capabilities import annotate_model
 
 logger=get_logger(__name__)
 class ModelService:
@@ -73,14 +74,14 @@ class ModelService:
                 "model_name": model.get("model_name"),
                 "created_at": model.get("created_at", None),  # 如果有created_at字段
             })
+            formatted[-1] = annotate_model(formatted[-1])
         return formatted
     @staticmethod
     def get_enabled_models_by_provider( provider_id: str|int,):
         from app.db.model_dao import get_models_by_provider
 
         all_models = get_models_by_provider(provider_id)
-        enabled_models = all_models
-        return enabled_models
+        return [annotate_model(model, provider_id=str(provider_id)) for model in all_models]
     @staticmethod
     def get_all_models_by_id(provider_id: str, verbose: bool = False):
         """拉取某供应商的可选模型列表，用于设置页下拉。
@@ -125,6 +126,14 @@ class ModelService:
             if fallback:
                 logger.info(f"[{provider['name']}] /models 为空，回退内置清单: {fallback}")
                 models = as_model_dicts(fallback, owned_by=provider.get("name", ""))
+
+        annotated_models = []
+        for model in models:
+            item = dict(model)
+            item.setdefault("model_name", item.get("id"))
+            item.setdefault("owned_by", provider.get("name", ""))
+            annotated_models.append(annotate_model(item, provider_id=str(provider.get("id", ""))))
+        models = annotated_models
 
         result = {"models": models}
         if not models and error:

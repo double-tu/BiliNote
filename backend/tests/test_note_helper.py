@@ -30,6 +30,20 @@ class TestNoteHelper(unittest.TestCase):
 
         self.assertEqual(result, markdown)
 
+    def test_replace_content_marker_uses_xiaohongshu_note_link(self):
+        note_id = "68a1bc2d000000001234abcd"
+
+        result = note_helper.replace_content_markers(
+            "重点 Content-01:23",
+            video_id=note_id,
+            platform="xiaohongshu",
+        )
+
+        self.assertEqual(
+            result,
+            f"重点 [原片 @ 01:23](https://www.xiaohongshu.com/explore/{note_id})",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

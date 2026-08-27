@@ -1,3 +1,22 @@
+export const XiaohongshuLogo = () => {
+  return (
+    <svg
+      className="icon"
+      viewBox="0 0 1024 1024"
+      xmlns="http://www.w3.org/2000/svg"
+      width="200"
+      height="200"
+    >
+      <rect width="1024" height="1024" rx="220" fill="#ff2442" />
+      <path
+        d="M225 300h574v118H225zM225 465h574v118H225zM225 630h370v118H225z"
+        fill="#fff"
+      />
+      <circle cx="740" cy="690" r="72" fill="#fff" />
+    </svg>
+  )
+}
+
 export const KuaishouLogo = () => {
   return (
     <svg

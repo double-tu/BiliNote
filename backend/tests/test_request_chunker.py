@@ -92,6 +92,22 @@ class TestRequestChunker(unittest.TestCase):
         groups = chunker.group_texts_by_budget(["aaaaa", "bbbbb", "ccccc"], build_text_messages)
         self.assertEqual(groups, [["aaaaa", "bbbbb"], ["ccccc"]])
 
+    def test_token_budget_is_enforced_in_addition_to_byte_budget(self):
+        segments = [DummySeg(0, 1, "中文" * 20)]
+        chunker = RequestChunker(
+            build_messages,
+            max_bytes=10_000,
+            size_estimator=size_estimator,
+            max_tokens=8,
+        )
+        chunks = chunker.chunk(segments, [])
+        self.assertGreater(len(chunks), 1)
+        self.assertEqual("".join(seg.text for c in chunks for seg in c.segments), segments[0].text)
+
+    def test_image_token_cost_counts_towards_budget(self):
+        messages = build_messages([DummySeg(0, 1, "x")], ["image"])
+        self.assertGreaterEqual(RequestChunker.estimate_tokens(messages, image_token_cost=777), 777)
+
 
 if __name__ == "__main__":
     unittest.main()

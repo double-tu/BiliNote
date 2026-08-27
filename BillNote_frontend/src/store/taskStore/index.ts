@@ -6,7 +6,16 @@ import toast from 'react-hot-toast'
 import { get, set, del } from 'idb-keyval'
 
 
-export type TaskStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILD'
+export type TaskStatus =
+  | 'PENDING'
+  | 'PARSING'
+  | 'DOWNLOADING'
+  | 'TRANSCRIBING'
+  | 'SUMMARIZING'
+  | 'SAVING'
+  | 'RUNNING'
+  | 'SUCCESS'
+  | 'FAILED'
 
 export interface AudioMeta {
   cover_url: string
@@ -43,6 +52,8 @@ export interface Task {
   markdown: string|Markdown [] //为了兼容之前的笔记
   transcript: Transcript
   status: TaskStatus
+  // 仅后端明确返回 FAILED 时为 true。旧版本因断网误标的 FAILED 会自动重新核验。
+  failureVerified?: boolean
   audioMeta: AudioMeta
   createdAt: string
   formData: {
@@ -58,6 +69,8 @@ export interface Task {
     format?: string[]
     video_understanding?: boolean
     force_transcription?: boolean
+    visual_model_name?: string
+    visual_provider_id?: string
     video_interval?: number
     grid_size?: number[]
   }
@@ -66,7 +79,7 @@ export interface Task {
 interface TaskStore {
   tasks: Task[]
   currentTaskId: string | null
-  addPendingTask: (taskId: string, platform: string) => void
+  addPendingTask: (taskId: string, platform: string, formData: Task['formData']) => void
   updateTaskContent: (id: string, data: Partial<Omit<Task, 'id' | 'createdAt'>>) => void
   removeTask: (id: string) => void
   clearTasks: () => void
@@ -89,6 +102,7 @@ export const useTaskStore = create<TaskStore>()(
               formData: formData,
               id: taskId,
               status: 'PENDING',
+              failureVerified: false,
               markdown: '',
               platform: platform,
               transcript: {
@@ -203,6 +217,7 @@ export const useTaskStore = create<TaskStore>()(
                     ...t,
                     formData: newFormData, // ✅ 显式更新 formData
                     status: 'PENDING',
+                    failureVerified: false,
                   }
                   : t
           ),

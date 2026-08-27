@@ -22,6 +22,12 @@ interface IModelListItem {
   provider_id: string
   model_name: string
   created_at?: string
+  capabilities?: {
+    model_role: 'text' | 'vision' | 'unknown'
+    supports_text: boolean
+    supports_vision: boolean | null
+    confidence: 'known' | 'unknown'
+  }
 }
 
 interface ModelStore {

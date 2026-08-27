@@ -20,6 +20,7 @@ class VideoReader:
                  unit_width=960,
                  unit_height=540,
                  save_quality=90,
+                 similarity_threshold=0.985,
                  font_path="fonts/arial.ttf",
                  frame_dir=None,
                  grid_dir=None):
@@ -30,10 +31,12 @@ class VideoReader:
         self.unit_width = unit_width
         self.unit_height = unit_height
         self.save_quality = save_quality
+        self.similarity_threshold = max(0.0, min(1.0, float(similarity_threshold)))
         self.frame_dir = frame_dir or get_app_dir("output_frames")
         self.grid_dir = grid_dir or get_app_dir("grid_output")
         print(f"视频路径：{video_path}",self.frame_dir,self.grid_dir)
         self.font_path = font_path
+        self.selected_timestamps: list[int] = []
 
     @staticmethod
     def _calculate_file_md5(file_path: str) -> str:
@@ -42,6 +45,17 @@ class VideoReader:
             for chunk in iter(lambda: f.read(8192), b""):
                 hasher.update(chunk)
         return hasher.hexdigest()
+
+    @staticmethod
+    def _calculate_frame_similarity(first_path: str, second_path: str) -> float | None:
+        """计算两帧的近似相似度；图像解析失败时返回 None 并回退 MD5 去重。"""
+        try:
+            import numpy as np
+            first = np.asarray(Image.open(first_path).convert("L").resize((32, 18)), dtype=np.float32)
+            second = np.asarray(Image.open(second_path).convert("L").resize((32, 18)), dtype=np.float32)
+            return float(1.0 - np.mean(np.abs(first - second)) / 255.0)
+        except Exception:
+            return None
 
     def format_time(self, seconds: float) -> str:
         mm = int(seconds // 60)
@@ -86,6 +100,7 @@ class VideoReader:
             # 按时间戳顺序整理结果，并进行去重
             image_paths = []
             last_hash = None
+            last_frame_path = None
             for ts in timestamps:
                 output_path = frame_results.get(ts)
                 if not output_path or not os.path.exists(output_path):
@@ -93,12 +108,23 @@ class VideoReader:
 
                 if self.dedupe_enabled:
                     frame_hash = self._calculate_file_md5(output_path)
-                    if frame_hash == last_hash:
+                    similarity = (
+                        self._calculate_frame_similarity(last_frame_path, output_path)
+                        if last_frame_path else None
+                    )
+                    if frame_hash == last_hash or (
+                        similarity is not None and similarity >= self.similarity_threshold
+                    ):
                         os.remove(output_path)
                         continue
                     last_hash = frame_hash
+                    last_frame_path = output_path
 
                 image_paths.append(output_path)
+            self.selected_timestamps = [
+                int(self.extract_time_from_filename(os.path.basename(path)))
+                for path in image_paths
+            ]
             return image_paths
         except Exception as e:
             logger.error(f"分割帧发生错误：{str(e)}")

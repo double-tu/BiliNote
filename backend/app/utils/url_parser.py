@@ -32,7 +32,24 @@ def extract_video_id(url: str, platform: str) -> Optional[str]:
         match = re.search(r"/video/(\d+)", url)
         return match.group(1) if match else None
 
+    elif platform == "xiaohongshu":
+        # 支持 /discovery/item/{id}、/explore/{id} 与 /item/{id}。
+        match = re.search(
+            r"/(?:discovery/item|explore|item)/([0-9a-fA-F]+)",
+            url,
+            re.IGNORECASE,
+        )
+        return match.group(1) if match else None
+
     return None
+
+
+def extract_first_http_url(text: str) -> Optional[str]:
+    """从平台分享文案中提取首个 HTTP(S) 链接，并移除常见尾部标点。"""
+    match = re.search(r"https?://[^\s]+", str(text or ""), re.IGNORECASE)
+    if not match:
+        return None
+    return match.group(0).rstrip("，。；;、)]}>\"'”’")
 
 
 def normalize_video_url(url: str) -> str:

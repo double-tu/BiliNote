@@ -1,6 +1,6 @@
 import json
-import logging
 import os
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -32,10 +32,12 @@ from app.services.provider import ProviderService
 from app.transcriber.base import Transcriber
 from app.transcriber.transcriber_provider import get_transcriber, _transcribers
 from app.utils.note_helper import replace_content_markers, prepend_source_link
-from app.utils.screenshot_marker import extract_screenshot_timestamps
+from app.utils.screenshot_marker import extract_screenshot_timestamps, insert_screenshot_markers_by_section
 from app.utils.status_code import StatusCode
 from app.utils.video_helper import generate_screenshot
 from app.utils.video_reader import VideoReader
+from app.utils.path_helper import get_app_dir
+from app.utils.logger import get_logger
 
 # ------------------ 环境变量与全局配置 ------------------
 
@@ -55,8 +57,7 @@ IMAGE_OUTPUT_DIR = os.getenv("OUT_DIR", "./static/screenshots")
 IMAGE_BASE_URL = os.getenv("IMAGE_BASE_URL", "/static/screenshots")
 
 # 日志配置
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger = get_logger(__name__)
 
 
 class NoteGenerator:
@@ -77,6 +78,7 @@ class NoteGenerator:
         self.transcriber: Transcriber = self._init_transcriber()
         self.video_path: Optional[Path] = None
         self.video_img_urls=[]
+        self.video_frame_timestamps: list[int] = []
         logger.info("NoteGenerator 初始化完成")
 
 
@@ -100,6 +102,8 @@ class NoteGenerator:
         video_interval: int = 0,
         grid_size: Optional[List[int]] = None,
         force_transcription: bool = False,
+        visual_model_name: Optional[str] = None,
+        visual_provider_id: Optional[str] = None,
     ) -> NoteResult | None:
         """
         主流程：按步骤依次下载、转写、GPT 总结、截图/链接处理、存库、返回 NoteResult。
@@ -120,11 +124,21 @@ class NoteGenerator:
         :param video_interval: 视频帧截取间隔（秒），仅在 video_understanding 为 True 时生效
         :param grid_size: 生成缩略图时的网格大小，如 [3, 3]
         :param force_transcription: 是否忽略平台字幕，强制使用语音转写
+        :param visual_model_name: 分离式视频理解使用的视觉模型名称（可选）
+        :param visual_provider_id: 分离式视频理解使用的视觉模型供应商 ID（可选）
         :return: NoteResult 对象，包含 markdown 文本、转写结果和音频元信息
         """
         if grid_size is None:
             grid_size = []
+        # 前端截图选项依赖视频理解。即使客户端携带了历史残留参数，
+        # 未开启视频理解时也不能触发视频下载、抽帧和截图流程。
+        _format = [value for value in (_format or []) if value != "screenshot" or video_understanding]
+        screenshot = bool(screenshot and video_understanding)
+        # 前端“原片截图”以 format 数组传递；统一映射到内部 screenshot 开关，
+        # 确保提示词会要求生成标记，且后处理会真正从视频抽取截图。
+        screenshot = bool(screenshot or "screenshot" in _format)
 
+        generation_started = time.perf_counter()
         try:
             logger.info(f"开始生成笔记 (task_id={task_id})")
             self._update_status(task_id, TaskStatus.PARSING)
@@ -206,7 +220,47 @@ class NoteGenerator:
                     force_transcription=force_transcription,
                 )
 
-            # 3. GPT 总结
+            # 3. 可选的分离式视觉分析：视觉模型只输出带时间戳的摘要，
+            #    最终文本模型不再携带图片，从而兼容纯文本模型并降低上下文压力。
+            visual_context = None
+            final_visual_urls = self.video_img_urls
+            if video_understanding and visual_model_name and visual_provider_id and self.video_img_urls:
+                visual_started = time.perf_counter()
+                logger.info(
+                    "视觉理解阶段开始: model=%s provider=%s images=%d",
+                    visual_model_name,
+                    visual_provider_id,
+                    len(self.video_img_urls),
+                )
+                try:
+                    visual_gpt = self._get_gpt(visual_model_name, visual_provider_id)
+                    analyze_images = getattr(visual_gpt, "analyze_images", None)
+                    if not callable(analyze_images):
+                        raise ValueError("当前视觉模型实现不支持图片分析")
+                    visual_context = analyze_images(
+                        self.video_img_urls,
+                        title=audio_meta.title,
+                    )
+                    final_visual_urls = []
+                    logger.info(
+                        "视觉理解阶段完成: model=%s elapsed=%.2fs output_chars=%d",
+                        visual_model_name,
+                        time.perf_counter() - visual_started,
+                        len(visual_context or ""),
+                    )
+                except Exception as exc:
+                    # 分离模式下文本模型可能本身不支持图片；视觉分析失败时宁可
+                    # 回退到纯文本摘要，也不要把图片重新塞回文本模型导致 400。
+                    final_visual_urls = []
+                    visual_context = f"（视觉模型分析失败，未获取到可靠的画面摘要：{exc}）"
+                    logger.warning(
+                        "视觉理解阶段失败: model=%s elapsed=%.2fs，最终文本阶段跳过图片: %s",
+                        visual_model_name,
+                        time.perf_counter() - visual_started,
+                        exc,
+                    )
+
+            # 4. GPT 总结
             markdown = self._summarize_text(
                 audio_meta=audio_meta,
                 transcript=transcript,
@@ -217,7 +271,8 @@ class NoteGenerator:
                 formats=_format or [],
                 style=style,
                 extras=extras,
-                video_img_urls=self.video_img_urls,
+                video_img_urls=final_visual_urls,
+                visual_context=visual_context,
             )
 
             # 4. 截图 & 链接替换
@@ -238,11 +293,21 @@ class NoteGenerator:
 
             # 6. 完成
             self._update_status(task_id, TaskStatus.SUCCESS)
-            logger.info(f"笔记生成成功 (task_id={task_id})")
+            logger.info(
+                "笔记生成成功: task_id=%s total_elapsed=%.2fs",
+                task_id,
+                time.perf_counter() - generation_started,
+            )
             return NoteResult(markdown=markdown, transcript=transcript, audio_meta=audio_meta)
 
         except Exception as exc:
-            logger.error(f"生成笔记流程异常 (task_id={task_id})：{exc}", exc_info=True)
+            logger.error(
+                "生成笔记流程异常: task_id=%s total_elapsed=%.2fs error=%s",
+                task_id,
+                time.perf_counter() - generation_started,
+                exc,
+                exc_info=True,
+            )
             self._update_status(task_id, TaskStatus.FAILED, message=str(exc))
             return None
 
@@ -409,14 +474,32 @@ class NoteGenerator:
         task_id = audio_cache_file.stem.split("_")[0]
         self._update_status(task_id, status_phase)
 
+        need_video = screenshot or video_understanding
+        if screenshot and not grid_size:
+            grid_size = [2, 2]
+        frame_interval = video_interval if video_interval and video_interval > 0 else 6
+
         # 已有缓存，尝试加载
         if audio_cache_file.exists():
             logger.info(f"检测到音频缓存 ({audio_cache_file})，直接读取")
             try:
                 data = json.loads(audio_cache_file.read_text(encoding="utf-8"))
-                return AudioDownloadResult(**data)
+                audio = AudioDownloadResult(**data)
             except Exception as e:
                 logger.warning(f"读取音频缓存失败，将重新下载：{e}")
+            else:
+                # 重试任务虽然可以复用音频元信息，但截图和视频理解仍依赖本次
+                # NoteGenerator 实例中的 video_path、关键帧与网格图，必须恢复。
+                if need_video:
+                    logger.info("音频缓存命中，但当前任务需要视频上下文，重新准备视频与关键帧")
+                    self._prepare_video_context(
+                        downloader=downloader,
+                        video_url=video_url,
+                        grid_size=grid_size,
+                        frame_interval=frame_interval,
+                        task_id=task_id,
+                    )
+                return audio
 
         # 有字幕且不需要截图/视频理解时，只提取元信息不下载文件
         if skip_download:
@@ -438,34 +521,14 @@ class NoteGenerator:
             except Exception as exc:
                 logger.warning(f"元信息提取失败，将尝试完整下载: {exc}")
 
-        # 判断是否需要下载视频
-        need_video = screenshot or video_understanding
-        if screenshot and not grid_size:
-            grid_size = [2, 2]
-
-        frame_interval = video_interval if video_interval and video_interval > 0 else 6
         if need_video:
-            try:
-                logger.info("开始下载视频")
-                video_path_str = downloader.download_video(video_url)
-                self.video_path = Path(video_path_str)
-                logger.info(f"视频下载完成：{self.video_path}")
-
-                if grid_size:
-                    self.video_img_urls = VideoReader(
-                        video_path=str(self.video_path),
-                        grid_size=tuple(grid_size),
-                        frame_interval=frame_interval,
-                        unit_width=960,
-                        unit_height=540,
-                        save_quality=80,
-                    ).run()
-                else:
-                    logger.info("未指定 grid_size，跳过缩略图生成")
-            except Exception as exc:
-                logger.error(f"视频下载失败：{exc}")
-                self._handle_exception(task_id, exc)
-                raise
+            self._prepare_video_context(
+                downloader=downloader,
+                video_url=video_url,
+                grid_size=grid_size,
+                frame_interval=frame_interval,
+                task_id=task_id,
+            )
 
         # 下载音频
         try:
@@ -481,6 +544,55 @@ class NoteGenerator:
             return audio
         except Exception as exc:
             logger.error(f"音频下载失败：{exc}")
+            self._handle_exception(task_id, exc)
+            raise
+
+    def _prepare_video_context(
+        self,
+        downloader: Downloader,
+        video_url: str,
+        grid_size: List[int],
+        frame_interval: int,
+        task_id: str,
+    ) -> None:
+        """为截图和视频理解准备视频路径、关键帧及网格图片。"""
+        try:
+            logger.info("开始准备视频上下文")
+            video_path_str = downloader.download_video(video_url)
+            self.video_path = Path(video_path_str)
+            logger.info(f"视频上下文文件准备完成：{self.video_path}")
+
+            if not grid_size:
+                logger.info("未指定 grid_size，跳过缩略图生成")
+                return
+
+            # VideoReader.run() 会清理 frame_*/grid_* 文件。多个任务并发时若使用
+            # 全局目录会互相删除文件；按 task_id 隔离目录后即可安全并行处理。
+            safe_task_id = Path(str(task_id)).name
+            context_root = Path(get_app_dir("video_context")) / safe_task_id
+            frame_dir = context_root / "frames"
+            grid_dir = context_root / "grids"
+            video_reader = VideoReader(
+                video_path=str(self.video_path),
+                grid_size=tuple(grid_size),
+                frame_interval=frame_interval,
+                similarity_threshold=float(os.getenv("VIDEO_FRAME_SIMILARITY_THRESHOLD", "0.985")),
+                unit_width=960,
+                unit_height=540,
+                save_quality=80,
+                frame_dir=str(frame_dir),
+                grid_dir=str(grid_dir),
+            )
+            self.video_img_urls = video_reader.run()
+            self.video_frame_timestamps = list(getattr(video_reader, "selected_timestamps", []))
+            logger.info(
+                "视频上下文准备完成: keyframes=%d grids=%d interval=%ds",
+                len(self.video_frame_timestamps),
+                len(self.video_img_urls),
+                frame_interval,
+            )
+        except Exception as exc:
+            logger.error(f"视频上下文准备失败：{exc}")
             self._handle_exception(task_id, exc)
             raise
 
@@ -582,13 +694,24 @@ class NoteGenerator:
 
         # 调用转写器
         try:
+            transcribe_started = time.perf_counter()
             logger.info("开始转写音频")
             transcript = self.transcriber.transcript(file_path=audio_file)
             transcript_cache_file.write_text(json.dumps(asdict(transcript), ensure_ascii=False, indent=2), encoding="utf-8")
-            logger.info(f"转写并缓存成功 ({transcript_cache_file})")
+            logger.info(
+                "转写并缓存成功: cache=%s elapsed=%.2fs segments=%d chars=%d",
+                transcript_cache_file,
+                time.perf_counter() - transcribe_started,
+                len(transcript.segments),
+                len(transcript.full_text or ""),
+            )
             return transcript
         except Exception as exc:
-            logger.error(f"音频转写失败：{exc}")
+            logger.error(
+                "音频转写失败: elapsed=%.2fs error=%s",
+                time.perf_counter() - transcribe_started,
+                exc,
+            )
             self._handle_exception(task_id, exc)
             raise
 
@@ -603,7 +726,8 @@ class NoteGenerator:
         formats: List[str],
         style: Optional[str],
         extras: Optional[str],
-            video_img_urls: List[str],
+        video_img_urls: List[str],
+        visual_context: Optional[str] = None,
     ) -> str | None:
         """
         调用 GPT 对转写结果进行总结，生成 Markdown 文本并缓存。
@@ -619,7 +743,14 @@ class NoteGenerator:
         :param extras: GPT 额外参数
         :return: 生成的 Markdown 字符串
         """
-        task_id = markdown_cache_file.stem
+        task_id = markdown_cache_file.stem.removesuffix("_markdown")
+        # 清理旧版本曾使用的 {task_id}_markdown.status.json，避免状态目录中
+        # 同时存在两个容易误读的状态文件。
+        legacy_status_file = NOTE_OUTPUT_DIR / f"{task_id}_markdown.status.json"
+        try:
+            legacy_status_file.unlink(missing_ok=True)
+        except OSError:
+            logger.debug("清理旧总结状态文件失败: %s", legacy_status_file)
         self._update_status(task_id, TaskStatus.SUMMARIZING)
 
         source = GPTSource(
@@ -632,13 +763,30 @@ class NoteGenerator:
             _format=formats,
             style=style,
             extras=extras,
+            visual_context=visual_context,
             checkpoint_key=task_id,
         )
 
         try:
+            summarize_started = time.perf_counter()
+            logger.info(
+                "文本总结阶段开始: task_id=%s model=%s transcript_segments=%d images=%d visual_chars=%d",
+                task_id,
+                getattr(gpt, "model", "unknown"),
+                len(transcript.segments),
+                len(video_img_urls or []),
+                len(visual_context or ""),
+            )
             markdown = gpt.summarize(source)
             markdown_cache_file.write_text(markdown, encoding="utf-8")
-            logger.info(f"GPT 总结并缓存成功 ({markdown_cache_file})")
+            logger.info(
+                "文本总结阶段完成: task_id=%s model=%s elapsed=%.2fs output_chars=%d cache=%s",
+                task_id,
+                getattr(gpt, "model", "unknown"),
+                time.perf_counter() - summarize_started,
+                len(markdown or ""),
+                markdown_cache_file,
+            )
             return markdown
         except Exception as exc:
             logger.error(f"GPT 总结失败：{exc}")
@@ -663,11 +811,29 @@ class NoteGenerator:
         :param platform: 平台标识，用于链接替换
         :return: 处理后的 Markdown 字符串
         """
-        if "screenshot" in formats and video_path:
-            try:
-                markdown = self._insert_screenshots(markdown, video_path)
-            except Exception as exc:
-                logger.warning("截图插入失败，跳过该步骤")
+        if "screenshot" in formats:
+            if not video_path:
+                logger.warning("截图后处理跳过: 已请求原片截图，但当前任务没有可用视频路径")
+            else:
+                try:
+                    # 某些文本模型会忽略截图格式要求，未输出占位符时使用关键帧兜底，
+                    # 避免用户勾选“原片截图”却得到零张图片。
+                    if not extract_screenshot_timestamps(markdown) and self.video_frame_timestamps:
+                        fallback_times = self.video_frame_timestamps[:6]
+                        markdown = insert_screenshot_markers_by_section(
+                            markdown,
+                            fallback_times,
+                            duration=float(audio_meta.duration or 0),
+                        )
+                        logger.info(
+                            "截图占位兜底完成: screenshots=%d sections_positioned=true",
+                            len(fallback_times),
+                        )
+                    marker_count = len(extract_screenshot_timestamps(markdown))
+                    markdown = self._insert_screenshots(markdown, video_path)
+                    logger.info("截图后处理完成: screenshots=%d", marker_count)
+                except Exception as exc:
+                    logger.warning("截图插入失败，跳过该步骤: %s", exc)
 
         if "link" in formats:
             try:

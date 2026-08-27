@@ -498,7 +498,12 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
                 </div>
               ) : (
               <>
-              <ScrollArea className="min-w-0 flex-1">
+              {/*
+                Radix ScrollArea 会复用 viewport DOM。切换历史笔记时，如果不重建
+                viewport，上一条笔记的 scrollTop 会被沿用，导致新笔记直接落在底部。
+                以任务 ID 作为 key，确保每条笔记拥有独立的滚动上下文，并从顶部开始。
+              */}
+              <ScrollArea key={currentTask?.id || 'markdown-empty'} className="min-w-0 flex-1">
                 <div className="px-2">
                   <VideoBanner
                     audioMeta={currentTask?.audioMeta}

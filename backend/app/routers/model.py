@@ -2,12 +2,18 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from app.services.model import ModelService
+from app.services.model_capabilities import infer_model_capabilities
 from app.utils.response import ResponseWrapper as R
 router = APIRouter()
 modelService = ModelService()
 class CreateModelRequest(BaseModel):
     provider_id: str
     model_name: str
+
+
+class ModelCapabilityRequest(BaseModel):
+    model_name: str
+    provider_id: str | None = None
 
 # 返回体：模型信息
 class ModelItem(BaseModel):
@@ -49,3 +55,13 @@ def get_enabled_models_by_provider(provider_id: str):
         return R.success(models, msg="获取启用模型成功")
     except Exception as e:
         return R.error(f"获取启用模型失败: {e}")
+
+
+@router.post("/model_capabilities")
+def model_capabilities(data: ModelCapabilityRequest):
+    """返回已知模型能力推断；unknown 表示需要用户或真实接口进一步确认。"""
+    return R.success({
+        "model_name": data.model_name,
+        "provider_id": data.provider_id,
+        "capabilities": infer_model_capabilities(data.model_name, data.provider_id),
+    })

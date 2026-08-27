@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 from typing import Callable, List, Optional
+import json
+import math
+import re
 
 
 @dataclass
@@ -9,16 +12,56 @@ class ChunkPayload:
 
 
 class RequestChunker:
-    def __init__(self, message_builder: Callable, max_bytes: int, size_estimator: Optional[Callable] = None):
+    def __init__(
+        self,
+        message_builder: Callable,
+        max_bytes: int,
+        size_estimator: Optional[Callable] = None,
+        max_tokens: Optional[int] = None,
+        token_estimator: Optional[Callable] = None,
+    ):
         self.message_builder = message_builder
         self.max_bytes = max_bytes
         self.size_estimator = size_estimator
+        self.max_tokens = max_tokens
+        self.token_estimator = token_estimator or self.estimate_tokens
 
     def estimate(self, messages) -> int:
         if self.size_estimator:
             return self.size_estimator(messages)
-        import json
         return len(json.dumps(messages, ensure_ascii=False).encode("utf-8"))
+
+    @staticmethod
+    def estimate_tokens(messages, image_token_cost: int = 1600) -> int:
+        """保守估算请求 token，兼容没有供应商 tokenizer 的 OpenAI 兼容接口。"""
+        def text_tokens(value: str) -> int:
+            if not value:
+                return 0
+            cjk = len(re.findall(r"[\u3400-\u9fff\uf900-\ufaff]", value))
+            non_cjk = re.sub(r"[\u3400-\u9fff\uf900-\ufaff]", " ", value)
+            words = re.findall(r"\S+", non_cjk)
+            ascii_chars = sum(len(word) for word in words)
+            return cjk + max(0, math.ceil(ascii_chars / 4)) + len(words)
+
+        def walk(value) -> int:
+            if isinstance(value, str):
+                return text_tokens(value)
+            if isinstance(value, list):
+                return sum(walk(item) for item in value)
+            if isinstance(value, dict):
+                if value.get("type") == "image_url" or "image_url" in value:
+                    return image_token_cost
+                return sum(walk(item) for item in value.values())
+            return 0
+
+        return walk(messages)
+
+    def _within_budget(self, messages) -> bool:
+        if self.estimate(messages) > self.max_bytes:
+            return False
+        if self.max_tokens is not None and self.token_estimator(messages) > self.max_tokens:
+            return False
+        return True
 
     def _messages_size(self, segments, image_urls, **kwargs) -> int:
         messages = self.message_builder(segments, image_urls, **kwargs)
@@ -49,8 +92,8 @@ class RequestChunker:
         while lo <= hi:
             mid = (lo + hi) // 2
             candidate = self._make_segment(segment, text[:mid])
-            size = self._messages_size([candidate], [], **kwargs)
-            if size <= self.max_bytes:
+            messages = self.message_builder([candidate], [], **kwargs)
+            if self._within_budget(messages):
                 best = mid
                 lo = mid + 1
             else:
@@ -74,8 +117,8 @@ class RequestChunker:
             batch_segments = []
             while seg_idx < len(segments):
                 candidate = batch_segments + [segments[seg_idx]]
-                size = self._messages_size(candidate, [], **kwargs)
-                if size <= self.max_bytes:
+                messages = self.message_builder(candidate, [], **kwargs)
+                if self._within_budget(messages):
                     batch_segments = candidate
                     seg_idx += 1
                     continue
@@ -102,7 +145,8 @@ class RequestChunker:
                 appended = False
                 for chunk in chunks[-1:]:
                     candidate_images = chunk.image_urls + [image]
-                    if self._messages_size(chunk.segments, candidate_images, **kwargs) <= self.max_bytes:
+                    messages = self.message_builder(chunk.segments, candidate_images, **kwargs)
+                    if self._within_budget(messages):
                         chunk.image_urls = candidate_images
                         appended = True
                         break
@@ -110,7 +154,7 @@ class RequestChunker:
                 if appended:
                     continue
 
-                if self._messages_size([], [image], **kwargs) > self.max_bytes:
+                if not self._within_budget(self.message_builder([], [image], **kwargs)):
                     raise ValueError("single image payload exceeds max_bytes")
                 chunks.append(ChunkPayload(segments=[], image_urls=[image]))
             return chunks
@@ -124,7 +168,8 @@ class RequestChunker:
             for chunk_idx in range(preferred_idx, len(chunks)):
                 chunk = chunks[chunk_idx]
                 candidate_images = chunk.image_urls + [image]
-                if self._messages_size(chunk.segments, candidate_images, **kwargs) <= self.max_bytes:
+                messages = self.message_builder(chunk.segments, candidate_images, **kwargs)
+                if self._within_budget(messages):
                     chunk.image_urls = candidate_images
                     placed = True
                     break
@@ -132,7 +177,7 @@ class RequestChunker:
             if placed:
                 continue
 
-            if self._messages_size([], [image], **kwargs) > self.max_bytes:
+            if not self._within_budget(self.message_builder([], [image], **kwargs)):
                 raise ValueError("single image payload exceeds max_bytes")
             chunks.append(ChunkPayload(segments=[], image_urls=[image]))
 
@@ -149,8 +194,7 @@ class RequestChunker:
                     messages = build_messages(candidate, [], **kwargs)
                 except TypeError:
                     messages = build_messages(candidate, **kwargs)
-                size = self.estimate(messages)
-                if size <= self.max_bytes:
+                if self._within_budget(messages):
                     group = candidate
                     idx += 1
                     continue
